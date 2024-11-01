@@ -47,26 +47,33 @@ yghk = model.addVars(
 # 목적함수: makespan 최소화
 model.setObjective(Cmax, GRB.MINIMIZE)
 
-# 제약식 (1): Makespan 정의
-for j in J:
-    for k in K:
-        model.addConstr(tjk[j,k] + pjk[j,k] <= Cmax)
 
+# 제약식 (1): Makespan 정의 - 수정
+for j in J:
+    model.addConstr(tjk[j,s] + pjk[j,s] <= Cmax)  # 마지막 stage의 완료시간만 고려
 # 제약식 (2): stage 간 선행관계
 for j in J:
     for k in range(1, s):
         model.addConstr(tjk[j,k] + pjk[j,k] <= tjk[j,k+1])
 
-# 제약식 (3): 같은 기계에서의 작업 순서 관계 (셋업 시간 포함)
+
+# 제약식 (3) 수정
 for g in J:
     for h in J:
-        if g != h:  # 서로 다른 작업 간에
+        if g != h:
             for k in K:
                 for m in range(1, Mk[k] + 1):
+                    # g가 h보다 먼저 처리되는 경우
                     model.addConstr(
-                        tjk[g,k] + pjk[g,k] + setup_time[g][h] <= tjk[h,k] + 
+                        tjk[h,k] >= tjk[g,k] + pjk[g,k] + setup_time[g][h] - 
                         U * (3 - xjkm[g,k,m] - xjkm[h,k,m] - yghk[g,h,k])
                     )
+                    # h가 g보다 먼저 처리되는 경우
+                    model.addConstr(
+                        tjk[h,k] + pjk[h,k] + setup_time[h][g] <= tjk[g,k] + 
+                        U * (3 - xjkm[g,k,m] - xjkm[h,k,m] - (1 - yghk[g,h,k]))
+                    )
+
 
 # 제약식 (4): 작업 순서의 상호배타성
 for g in J:
@@ -92,28 +99,55 @@ model.optimize()
 if model.status == GRB.OPTIMAL:
     print(f'\nMakespan: {Cmax.X:.2f}')
     
-    # 간트차트 생성
     fig, ax = plt.subplots(figsize=(12, 6))
-    colors = ['#FF9999', '#99FF99', '#9999FF']
+    colors = {'job': ['#FF9999', '#99FF99', '#9999FF'], 'setup': 'white'}
     
     y_positions = {
-        (1,1): 4, (1,2): 3,  # Stage 1의 기계들
-        (2,1): 2, (2,2): 1   # Stage 2의 기계들
+        (1,1): 4, (1,2): 3,
+        (2,1): 2, (2,2): 1
     }
     
+    # 각 기계별로 작업 순서 정렬
+    machine_jobs = {(k,m): [] for k in K for m in range(1, Mk[k] + 1)}
+    
+    # 작업 할당 및 시작 시간 수집
     for j in J:
         for k in K:
             for m in range(1, Mk[k] + 1):
                 if xjkm[j,k,m].X > 0.5:
-                    start_time = tjk[j,k].X
-                    duration = pjk[j,k]
-                    y_pos = y_positions[k,m]
-                    
-                    ax.barh(y_pos, duration, left=start_time, 
-                           height=0.8, color=colors[j-1],
-                           edgecolor='black')
-                    ax.text(start_time + duration/2, y_pos, f'J{j}',
-                          ha='center', va='center')
+                    machine_jobs[k,m].append((j, tjk[j,k].X))
+    
+    # 각 기계별로 시작 시간 순으로 정렬
+    for k,m in machine_jobs:
+        machine_jobs[k,m].sort(key=lambda x: x[1])
+        jobs = machine_jobs[k,m]
+        
+        # 각 작업 그리기
+        for i in range(len(jobs)):
+            j = jobs[i][0]
+            start_time = jobs[i][1]
+            y_pos = y_positions[k,m]
+            
+            # 작업 블록
+            ax.barh(y_pos, pjk[j,k], left=start_time,
+                   height=0.8, color=colors['job'][j-1],
+                   edgecolor='black')
+            
+            # 작업 레이블
+            ax.text(start_time + pjk[j,k]/2, y_pos,
+                   f'J{j}', ha='center', va='center')
+            
+            # 셋업 시간 블록 (다음 작업이 있는 경우)
+            if i < len(jobs) - 1:
+                next_j = jobs[i+1][0]
+                setup_start = start_time + pjk[j,k]
+                setup_time_val = setup_time[j][next_j]
+                
+                ax.barh(y_pos, setup_time_val, left=setup_start,
+                       height=0.8, color='white',
+                       edgecolor='black', hatch='//')
+                ax.text(setup_start + setup_time_val/2, y_pos,
+                       'S', ha='center', va='center')
     
     ax.set_ylim(0.5, 4.5)
     ax.set_xlabel('Time')
@@ -130,17 +164,24 @@ if model.status == GRB.OPTIMAL:
     
     ax.grid(True, axis='x', linestyle='--', alpha=0.7)
     plt.title('Hybrid Flowshop Schedule Gantt Chart')
+    
+    # 범례
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor=colors['job'][i-1], edgecolor='black', label=f'Job {i}')
+        for i in J
+    ]
+    legend_elements.append(
+        Patch(facecolor='white', edgecolor='black', hatch='//', label='Setup')
+    )
+    ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    plt.tight_layout()
     plt.show()
     
     # 상세 스케줄 출력
     print("\n상세 스케줄:")
-    for j in J:
-        print(f'\nJob {j}:')
-        for k in K:
-            for m in range(1, Mk[k] + 1):
-                if xjkm[j,k,m].X > 0.5:
-                    print(f'Stage {k}, Machine {m}: 시작={tjk[j,k].X:.1f}, ' +
-                          f'종료={tjk[j,k].X + pjk[j,k]:.1f}')
-
-else:
-    print('최적해를 찾을 수 없습니다.')
+    for k,m in sorted(machine_jobs.keys()):
+        print(f"\nStage {k}, Machine {m}:")
+        for j, start_time in sorted(machine_jobs[k,m], key=lambda x: x[1]):
+            print(f"Job {j}: 시작={start_time:.1f}, 종료={start_time + pjk[j,k]:.1f}")
